@@ -25,6 +25,24 @@ try:
 except ImportError:
     pass
 
+# Global variable to store the precision type (fp16 or bf16)
+_precision_dtype = torch.float16
+
+def set_precision(dtype):
+    """Set the global precision dtype for mixed precision training.
+    
+    Args:
+        dtype (torch.dtype): Either torch.float16 or torch.bfloat16
+    """
+    global _precision_dtype
+    assert dtype in [torch.float16, torch.bfloat16, torch.half], \
+        f"dtype must be torch.float16 or torch.bfloat16, got {dtype}"
+    _precision_dtype = torch.float16 if dtype == torch.half else dtype
+
+def get_precision():
+    """Get the current precision dtype."""
+    return _precision_dtype
+
 
 def cast_tensor_type(inputs, src_type: torch.dtype, dst_type: torch.dtype):
     """Recursively convert Tensor in inputs from src_type to dst_type.
@@ -125,12 +143,13 @@ def auto_fp16(
             # convert the args that need to be processed
             new_args = []
             # NOTE: default args are not taken into consideration
+            target_dtype = get_precision()
             if args:
                 arg_names = args_info.args[:len(args)]
                 for i, arg_name in enumerate(arg_names):
                     if arg_name in args_to_cast:
                         new_args.append(
-                            cast_tensor_type(args[i], torch.float, torch.half))
+                            cast_tensor_type(args[i], torch.float, target_dtype))
                     else:
                         new_args.append(args[i])
             # convert the kwargs that need to be processed
@@ -139,19 +158,19 @@ def auto_fp16(
                 for arg_name, arg_value in kwargs.items():
                     if arg_name in args_to_cast:
                         new_kwargs[arg_name] = cast_tensor_type(
-                            arg_value, torch.float, torch.half)
+                            arg_value, torch.float, target_dtype)
                     else:
                         new_kwargs[arg_name] = arg_value
             # apply converted arguments to the decorated method
             if (TORCH_VERSION != 'parrots' and
                     digit_version(TORCH_VERSION) >= digit_version('1.6.0')):
-                with autocast(enabled=True):
+                with autocast(enabled=True, dtype=target_dtype):
                     output = old_func(*new_args, **new_kwargs)
             else:
                 output = old_func(*new_args, **new_kwargs)
             # cast the results back to fp32 if necessary
             if out_fp32:
-                output = cast_tensor_type(output, torch.half, torch.float)
+                output = cast_tensor_type(output, target_dtype, torch.float)
             return output
 
         return new_func
@@ -212,12 +231,13 @@ def force_fp32(apply_to: Optional[Iterable] = None,
             args_to_cast = args_info.args if apply_to is None else apply_to
             # convert the args that need to be processed
             new_args = []
+            target_dtype = get_precision()
             if args:
                 arg_names = args_info.args[:len(args)]
                 for i, arg_name in enumerate(arg_names):
                     if arg_name in args_to_cast:
                         new_args.append(
-                            cast_tensor_type(args[i], torch.half, torch.float))
+                            cast_tensor_type(args[i], target_dtype, torch.float))
                     else:
                         new_args.append(args[i])
             # convert the kwargs that need to be processed
@@ -226,7 +246,7 @@ def force_fp32(apply_to: Optional[Iterable] = None,
                 for arg_name, arg_value in kwargs.items():
                     if arg_name in args_to_cast:
                         new_kwargs[arg_name] = cast_tensor_type(
-                            arg_value, torch.half, torch.float)
+                            arg_value, target_dtype, torch.float)
                     else:
                         new_kwargs[arg_name] = arg_value
             # apply converted arguments to the decorated method
@@ -238,7 +258,7 @@ def force_fp32(apply_to: Optional[Iterable] = None,
                 output = old_func(*new_args, **new_kwargs)
             # cast the results back to fp32 if necessary
             if out_fp16:
-                output = cast_tensor_type(output, torch.float, torch.half)
+                output = cast_tensor_type(output, torch.float, target_dtype)
             return output
 
         return new_func
@@ -257,7 +277,7 @@ def allreduce_grads(params: List[Parameter],
 
 
 def wrap_fp16_model(model: nn.Module) -> None:
-    """Wrap the FP32 model to FP16.
+    """Wrap the FP32 model to FP16 or BF16.
 
     If you are using PyTorch >= 1.6, torch.cuda.amp is used as the
     backend, otherwise, original mmcv implementation will be adopted.
@@ -266,17 +286,18 @@ def wrap_fp16_model(model: nn.Module) -> None:
     1. Set fp16 flag inside the model to True.
 
     Otherwise:
-    1. Convert FP32 model to FP16.
+    1. Convert FP32 model to FP16/BF16.
     2. Remain some necessary layers to be FP32, e.g., normalization layers.
     3. Set `fp16_enabled` flag inside the model to True.
 
     Args:
         model (nn.Module): Model in FP32.
     """
+    target_dtype = get_precision()
     if (TORCH_VERSION == 'parrots'
             or digit_version(TORCH_VERSION) < digit_version('1.6.0')):
-        # convert model to fp16
-        model.half()
+        # convert model to target dtype (fp16 or bf16)
+        model.to(dtype=target_dtype)
         # patch the normalization layers to make it work in fp32 mode
         patch_norm_fp32(model)
     # set `fp16_enabled` flag
@@ -286,19 +307,20 @@ def wrap_fp16_model(model: nn.Module) -> None:
 
 
 def patch_norm_fp32(module: nn.Module) -> nn.Module:
-    """Recursively convert normalization layers from FP16 to FP32.
+    """Recursively convert normalization layers from FP16/BF16 to FP32.
 
     Args:
-        module (nn.Module): The modules to be converted in FP16.
+        module (nn.Module): The modules to be converted in FP16/BF16.
 
     Returns:
         nn.Module: The converted module, the normalization layers have been
             converted to FP32.
     """
+    target_dtype = get_precision()
     if isinstance(module, (nn.modules.batchnorm._BatchNorm, nn.GroupNorm)):
         module.float()
         if isinstance(module, nn.GroupNorm) or torch.__version__ < '1.3':
-            module.forward = patch_forward_method(module.forward, torch.half,
+            module.forward = patch_forward_method(module.forward, target_dtype,
                                                   torch.float)
     for child in module.children():
         patch_norm_fp32(child)

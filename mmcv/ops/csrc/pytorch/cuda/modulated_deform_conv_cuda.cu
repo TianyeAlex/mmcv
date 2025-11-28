@@ -13,7 +13,7 @@ void modulated_deformable_im2col_cuda(
   const int channel_per_deformable_group = channels / deformable_group;
   const int num_kernels = channels * batch_size * height_col * width_col;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16,
       data_im.scalar_type(), "modulated_deformable_im2col_gpu", ([&] {
         const scalar_t *data_im_ = data_im.data_ptr<scalar_t>();
         const scalar_t *data_offset_ = data_offset.data_ptr<scalar_t>();
@@ -42,7 +42,7 @@ void modulated_deformable_col2im_cuda(
   const int num_kernels =
       channels * kernel_h * kernel_w * batch_size * height_col * width_col;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16,
       data_col.scalar_type(), "modulated_deformable_col2im_gpu", ([&] {
         const scalar_t *data_col_ = data_col.data_ptr<scalar_t>();
         const scalar_t *data_offset_ = data_offset.data_ptr<scalar_t>();
@@ -73,7 +73,7 @@ void modulated_deformable_col2im_coord_cuda(
   const int channel_per_deformable_group =
       channels * kernel_h * kernel_w / deformable_group;
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16,
       data_col.scalar_type(), "modulated_deformable_col2im_coord_gpu", ([&] {
         const scalar_t *data_col_ = data_col.data_ptr<scalar_t>();
         const scalar_t *data_im_ = data_im.data_ptr<scalar_t>();
