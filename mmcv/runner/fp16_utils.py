@@ -279,28 +279,23 @@ def allreduce_grads(params: List[Parameter],
 def wrap_fp16_model(model: nn.Module) -> None:
     """Wrap the FP32 model to FP16 or BF16.
 
-    If you are using PyTorch >= 1.6, torch.cuda.amp is used as the
-    backend, otherwise, original mmcv implementation will be adopted.
-
-    For PyTorch >= 1.6, this function will
-    1. Set fp16 flag inside the model to True.
-
-    Otherwise:
-    1. Convert FP32 model to FP16/BF16.
-    2. Remain some necessary layers to be FP32, e.g., normalization layers.
-    3. Set `fp16_enabled` flag inside the model to True.
+    This function converts model parameters to FP16/BF16 for memory savings,
+    while keeping normalization layers in FP32 for numerical stability.
+    Works with both old mmcv implementation and PyTorch AMP (>= 1.6).
 
     Args:
         model (nn.Module): Model in FP32.
     """
     target_dtype = get_precision()
-    if (TORCH_VERSION == 'parrots'
-            or digit_version(TORCH_VERSION) < digit_version('1.6.0')):
-        # convert model to target dtype (fp16 or bf16)
-        model.to(dtype=target_dtype)
-        # patch the normalization layers to make it work in fp32 mode
-        patch_norm_fp32(model)
-    # set `fp16_enabled` flag
+    
+    # Always convert model parameters to target dtype (fp16 or bf16)
+    # This provides significant memory savings for model parameters
+    model.to(dtype=target_dtype)
+    
+    # Keep normalization layers in FP32 for numerical stability
+    patch_norm_fp32(model)
+    
+    # Set fp16_enabled flag for @auto_fp16 decorated methods
     for m in model.modules():
         if hasattr(m, 'fp16_enabled'):
             m.fp16_enabled = True
