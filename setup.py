@@ -303,6 +303,14 @@ def get_extensions():
                 glob.glob('./mmcv/ops/csrc/pytorch/cpu/*.cpp') + \
                 glob.glob('./mmcv/ops/csrc/pytorch/cuda/*.cu') + \
                 glob.glob('./mmcv/ops/csrc/pytorch/cuda/*.cpp')
+            # Exclude opt version files to avoid linking conflicts
+            # Use exact file paths to avoid accidentally excluding other files
+            opt_files = {
+                './mmcv/ops/csrc/pytorch/ms_deform_attn_opt.cpp',
+                './mmcv/ops/csrc/pytorch/pybind_opt.cpp',
+                './mmcv/ops/csrc/pytorch/cuda/ms_deform_attn_cuda_opt.cu'
+            }
+            op_files = [f for f in op_files if f not in opt_files]
             extension = CUDAExtension
             include_dirs.append(os.path.abspath('./mmcv/ops/csrc/pytorch'))
             include_dirs.append(os.path.abspath('./mmcv/ops/csrc/common'))
