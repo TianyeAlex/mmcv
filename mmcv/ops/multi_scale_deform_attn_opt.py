@@ -19,10 +19,6 @@ from mmcv.runner import BaseModule
 from mmcv.utils import IS_CUDA_AVAILABLE, IS_MLU_AVAILABLE
 from ..utils import ext_loader
 
-# Load original MMCV extension for forward pass
-ext_module = ext_loader.load_ext(
-    '_ext', ['ms_deform_attn_forward', 'ms_deform_attn_backward'])
-
 # Load optimized extension for backward pass only
 ext_module_opt = ext_loader.load_ext(
     '_ext_opt', ['ms_deform_attn_backward_opt', 'ms_deform_attn_forward_opt'])
@@ -84,7 +80,7 @@ class MultiScaleDeformableAttnFunctionOpt(Function):
         attention_weights = attention_weights.type_as(value)
 
         # HYBRID OPTIMIZATION: Use ORIGINAL forward for best performance
-        output = ext_module.ms_deform_attn_forward(
+        output = ext_module_opt.ms_deform_attn_forward_opt(
             value,
             value_spatial_shapes,
             value_level_start_index,
