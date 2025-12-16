@@ -1,12 +1,11 @@
 /*!
 **************************************************************************************************
-* Deformable DETR - Optimized Version (Hybrid: Original Forward + Optimized Backward)
+* Deformable DETR
 * Copyright (c) 2020 SenseTime. All Rights Reserved.
 * Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 **************************************************************************************************
-* Hybrid Optimization Strategy:
-* 1. Forward Pass: Use original MMCV (L1 cache) - avoids -15% regression
-* 2. Backward Pass: Use optimized version (__ldg texture cache) - keeps +24% improvement
+* Modified from
+*https://github.com/chengdazhi/Deformable-Convolution-V2-PyTorch/tree/pytorch_1.0.0
 **************************************************************************************************
 */
 
