@@ -57,6 +57,24 @@ void ms_deformable_col2im_cuda_opt(
       (channels > THREADS_PER_BLOCK) ? THREADS_PER_BLOCK : channels;
   const int num_kernels = batch_size * num_query * num_heads * channels;
   const int num_actual_kernels = batch_size * num_query * num_heads * channels;
+
+  // Specialized fast path for channels == 32: blockDim=128, warp-split points
+  if (channels == 32) {
+    const int num_blocks = batch_size * num_query * num_heads;
+    const int threads_c32 = 128;
+    ms_deformable_col2im_gpu_kernel_c32_opt<scalar_t>
+        <<<num_blocks, threads_c32, 0, stream>>>(
+            batch_size, spatial_size, num_heads, num_levels, num_query,
+            num_point, data_spatial_shapes, data_level_start_index,
+            data_sampling_loc, data_attn_weight, grad_col, data_value,
+            grad_value, grad_sampling_loc, grad_attn_weight);
+    cudaError_t err_c32 = cudaGetLastError();
+    if (err_c32 != cudaSuccess) {
+      printf("error in ms_deformable_col2im_cuda_opt (c32 fast path): %s\n",
+             cudaGetErrorString(err_c32));
+    }
+    return;
+  }
   
   if (channels > THREADS_PER_BLOCK) {
     if ((channels & (THREADS_PER_BLOCK - 1)) == 0) {

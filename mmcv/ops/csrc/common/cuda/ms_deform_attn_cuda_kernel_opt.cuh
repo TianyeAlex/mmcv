@@ -64,6 +64,35 @@ __device__ scalar_t ms_deform_attn_im2col_bilinear_opt(
 }
 
 template <typename scalar_t>
+__device__ inline scalar_t warp_shfl_down(scalar_t v, int offset) {
+  return __shfl_down_sync(0xffffffff, v, offset);
+}
+
+template <>
+__device__ inline c10::Half warp_shfl_down<c10::Half>(c10::Half v,
+                                                      int offset) {
+  __half h = static_cast<__half>(v);
+  h = __shfl_down_sync(0xffffffff, h, offset);
+  return static_cast<c10::Half>(h);
+}
+
+template <>
+__device__ inline c10::BFloat16 warp_shfl_down<c10::BFloat16>(
+    c10::BFloat16 v, int offset) {
+  __nv_bfloat16 h = static_cast<__nv_bfloat16>(v);
+  h = __shfl_down_sync(0xffffffff, h, offset);
+  return static_cast<c10::BFloat16>(h);
+}
+
+template <typename scalar_t>
+__device__ inline scalar_t warp_sum(scalar_t v) {
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    v += warp_shfl_down<scalar_t>(v, offset);
+  }
+  return v;
+}
+
+template <typename scalar_t>
 __device__ void ms_deform_attn_col2im_bilinear_opt(
     const scalar_t *&bottom_data, const int &height, const int &width,
     const int &nheads, const int &channels, const scalar_t &h,
@@ -730,6 +759,137 @@ __global__ void ms_deformable_col2im_gpu_kernel_shm_reduce_v2_multi_blocks_opt(
         data_loc_w_ptr += 2;
         grad_attn_weight_out += grad_weight_stride;
         grad_sampling_loc_out += grad_loc_stride;
+      }
+    }
+  }
+}
+
+// Specialized path for channels=32: blockDim=128 (4 warps). Each warp handles a
+// distinct subset of points, and reduces across channels within the warp.
+template <typename scalar_t>
+__global__ void ms_deformable_col2im_gpu_kernel_c32_opt(
+    const int batch_size, const int spatial_size, const int num_heads,
+    const int num_levels, const int num_query, const int num_point,
+    const int64_t *data_spatial_shapes, const int64_t *data_level_start_index,
+    const scalar_t *data_sampling_loc, const scalar_t *data_attn_weight,
+    const scalar_t *grad_col, const scalar_t *data_value,
+    scalar_t *grad_value, scalar_t *grad_sampling_loc,
+    scalar_t *grad_attn_weight) {
+  const int channels = 32;
+  const int warps_per_block = 4;  // blockDim.x is expected to be 128
+  const int lane = threadIdx.x & 31;
+  const int warp_id = threadIdx.x >> 5;
+  if (warp_id >= warps_per_block) {
+    return;
+  }
+
+  const int sampling_index = blockIdx.x;  // [batch, num_query, num_heads]
+  int _tmp = sampling_index;
+  const int m_col = _tmp % num_heads;
+  _tmp /= num_heads;
+  const int b_col = _tmp / num_query;
+
+  const int qid_stride = num_heads * channels;
+  const int data_value_ptr_init_offset = b_col * spatial_size * qid_stride;
+
+  const scalar_t *grad_col_ptr = grad_col + sampling_index * channels;
+  const scalar_t top_grad = grad_col_ptr[lane];
+
+  scalar_t *grad_sampling_base =
+      grad_sampling_loc + sampling_index * num_levels * num_point * 2;
+  scalar_t *grad_attn_base =
+      grad_attn_weight + sampling_index * num_levels * num_point;
+
+  for (int l_col = 0; l_col < num_levels; ++l_col) {
+    const int level_start_id = data_level_start_index[l_col];
+    const int spatial_h_ptr = l_col << 1;
+    const int spatial_h = data_spatial_shapes[spatial_h_ptr];
+    const int spatial_w = data_spatial_shapes[spatial_h_ptr + 1];
+    const int value_ptr_offset =
+        data_value_ptr_init_offset + level_start_id * qid_stride;
+    const scalar_t *data_value_ptr = data_value + value_ptr_offset;
+    scalar_t *grad_value_ptr = grad_value + value_ptr_offset;
+
+    // Each warp handles a distinct subset of points: p = warp_id, warp_id+4
+    for (int p_col = warp_id; p_col < num_point; p_col += warps_per_block) {
+      const int data_weight_ptr =
+          (sampling_index * num_levels + l_col) * num_point + p_col;
+      const int data_loc_w_ptr = data_weight_ptr << 1;
+
+      const scalar_t loc_w = data_sampling_loc[data_loc_w_ptr];
+      const scalar_t loc_h = data_sampling_loc[data_loc_w_ptr + 1];
+      const scalar_t weight = data_attn_weight[data_weight_ptr];
+
+      const scalar_t h_im = loc_h * spatial_h - 0.5;
+      const scalar_t w_im = loc_w * spatial_w - 0.5;
+
+      if (h_im > -1 && w_im > -1 && h_im < spatial_h && w_im < spatial_w) {
+        const int h_low = floorf(h_im);
+        const int w_low = floorf(w_im);
+        const int h_high = h_low + 1;
+        const int w_high = w_low + 1;
+
+        const scalar_t lh = h_im - h_low;
+        const scalar_t lw = w_im - w_low;
+        const scalar_t hh = 1 - lh, hw = 1 - lw;
+
+        const int w_stride = num_heads * channels;
+        const int h_stride = spatial_w * w_stride;
+        const int h_low_ptr_offset = h_low * h_stride;
+        const int h_high_ptr_offset = h_low_ptr_offset + h_stride;
+        const int w_low_ptr_offset = w_low * w_stride;
+        const int w_high_ptr_offset = w_low_ptr_offset + w_stride;
+        const int base_ptr = m_col * channels + lane;
+
+        scalar_t grad_h_weight = 0, grad_w_weight = 0;
+        scalar_t v1 = 0, v2 = 0, v3 = 0, v4 = 0;
+
+        if (h_low >= 0 && w_low >= 0) {
+          const int ptr1 = h_low_ptr_offset + w_low_ptr_offset + base_ptr;
+          v1 = data_value_ptr[ptr1];
+          grad_h_weight -= hw * v1;
+          grad_w_weight -= hh * v1;
+          atomicAdd(grad_value_ptr + ptr1, hh * hw * top_grad * weight);
+        }
+        if (h_low >= 0 && w_high <= spatial_w - 1) {
+          const int ptr2 = h_low_ptr_offset + w_high_ptr_offset + base_ptr;
+          v2 = data_value_ptr[ptr2];
+          grad_h_weight -= lw * v2;
+          grad_w_weight += hh * v2;
+          atomicAdd(grad_value_ptr + ptr2, hh * lw * top_grad * weight);
+        }
+        if (h_high <= spatial_h - 1 && w_low >= 0) {
+          const int ptr3 = h_high_ptr_offset + w_low_ptr_offset + base_ptr;
+          v3 = data_value_ptr[ptr3];
+          grad_h_weight += hw * v3;
+          grad_w_weight -= lh * v3;
+          atomicAdd(grad_value_ptr + ptr3, lh * hw * top_grad * weight);
+        }
+        if (h_high <= spatial_h - 1 && w_high <= spatial_w - 1) {
+          const int ptr4 = h_high_ptr_offset + w_high_ptr_offset + base_ptr;
+          v4 = data_value_ptr[ptr4];
+          grad_h_weight += lw * v4;
+          grad_w_weight += lh * v4;
+          atomicAdd(grad_value_ptr + ptr4, lh * lw * top_grad * weight);
+        }
+
+        const scalar_t val = (hh * hw * v1 + hh * lw * v2 +
+                              lh * hw * v3 + lh * lw * v4);
+        const scalar_t top_grad_value = top_grad * weight;
+        scalar_t grad_attn = top_grad * val;
+        scalar_t grad_w_out = spatial_w * grad_w_weight * top_grad_value;
+        scalar_t grad_h_out = spatial_h * grad_h_weight * top_grad_value;
+
+        grad_attn = warp_sum(grad_attn);
+        grad_w_out = warp_sum(grad_w_out);
+        grad_h_out = warp_sum(grad_h_out);
+
+        if (lane == 0) {
+          const int out_offset = (l_col * num_point + p_col) * 2;
+          grad_attn_base[l_col * num_point + p_col] = grad_attn;
+          grad_sampling_base[out_offset] = grad_w_out;
+          grad_sampling_base[out_offset + 1] = grad_h_out;
+        }
       }
     }
   }
