@@ -58,10 +58,10 @@ void ms_deformable_col2im_cuda_opt(
   const int num_kernels = batch_size * num_query * num_heads * channels;
   const int num_actual_kernels = batch_size * num_query * num_heads * channels;
 
-  // Specialized fast path for channels == 32: blockDim=128, warp-split points
+  // Specialized fast path for channels == 32: blockDim=64, warp-split points
   if (channels == 32) {
     const int num_blocks = batch_size * num_query * num_heads;
-    const int threads_c32 = 128;
+    const int threads_c32 = 64;
     ms_deformable_col2im_gpu_kernel_c32_opt<scalar_t>
         <<<num_blocks, threads_c32, 0, stream>>>(
             batch_size, spatial_size, num_heads, num_levels, num_query,

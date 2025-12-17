@@ -764,7 +764,7 @@ __global__ void ms_deformable_col2im_gpu_kernel_shm_reduce_v2_multi_blocks_opt(
   }
 }
 
-// Specialized path for channels=32: blockDim=128 (4 warps). Each warp handles a
+// Specialized path for channels=32: blockDim=64 (2 warps). Each warp handles a
 // distinct subset of points, and reduces across channels within the warp.
 template <typename scalar_t>
 __global__ void ms_deformable_col2im_gpu_kernel_c32_opt(
@@ -776,7 +776,7 @@ __global__ void ms_deformable_col2im_gpu_kernel_c32_opt(
     scalar_t *grad_value, scalar_t *grad_sampling_loc,
     scalar_t *grad_attn_weight) {
   const int channels = 32;
-  const int warps_per_block = 4;  // blockDim.x is expected to be 128
+  const int warps_per_block = 2;  // blockDim.x is expected to be 64
   const int lane = threadIdx.x & 31;
   const int warp_id = threadIdx.x >> 5;
   if (warp_id >= warps_per_block) {
